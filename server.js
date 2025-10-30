@@ -1,7 +1,7 @@
 /**
- * Render Server – PeakAlgo Scalp (TradingView → Bybit)
- * Market Entry + ATR-based TP/SL + dynamic 95% qty + logging
- * Fixed UTA Balance Fetch (GET-based)
+ * PeakAlgo Render Bot – TradingView → Bybit
+ * Market Entry + ATR-based TP/SL + dynamic 90% qty + leverage + logging
+ * Compatible with Unified Trading Account (UTA) & Contract
  */
 
 import express from "express";
@@ -22,7 +22,7 @@ app.post("/", async (req, res) => {
     if (!event || !symbol || !price)
       return res.status(400).json({ ok: false, error: "Missing fields" });
 
-    // === Credentials & API URL ===
+    // === API Credentials & Base URL ===
     const API_KEY = process.env.BYBIT_API_KEY;
     const API_SECRET = process.env.BYBIT_API_SECRET;
     const BASE_URL = (process.env.BYBIT_API_URL || "https://api.bybit.com")
@@ -42,12 +42,13 @@ app.post("/", async (req, res) => {
     if (!side)
       return res.status(400).json({ ok: false, error: "Invalid event" });
 
-    // === TP/SL übernehmen (von TV oder fallback) ===
+    // === TP/SL übernehmen (von TV oder Fallback) ===
     let tp = data.tp || (side === "Buy" ? price * 1.003 : price * 0.997);
     let sl = data.sl || (side === "Buy" ? price * 0.997 : price * 1.003);
     tp = parseFloat(tp).toFixed(2);
     sl = parseFloat(sl).toFixed(2);
 
+    console.log("///////////////////////////////////////////////////////////");
     console.log("=== ORDER START ===");
     console.log({ event, side, symbol, price, tp, sl, lvg });
     console.log("===================");
@@ -88,31 +89,44 @@ app.post("/", async (req, res) => {
     if (usdtBalance <= 0)
       throw new Error("No available USDT balance or invalid API response.");
 
-// === Schritt 1.1: Margin- und Hebel-basierte Positionsgröße ===
-const marginFraction = 0.90;
-const leverage = Number(lvg) || 1;
+    // === Schritt 1.1: Margin- und Hebel-basierte Positionsgröße ===
+    const marginFraction = 0.90; // 90 % des Balances als Margin
+    const leverage = Number(lvg) || 1;
 
-const marginUsed = usdtBalance * marginFraction;
-const positionValue = marginUsed * leverage;
+    const marginUsed = usdtBalance * marginFraction;
+    const positionValue = marginUsed * leverage;
 
-// BTC-Menge berechnen
-let qty = positionValue / price;
+    let qty = positionValue / price;
 
-// Sicherheitslimits
-qty = Math.max(0.001, Math.min(qty, 10));
+    // Sicherheitslimits und korrekte Rundung (Bybit StepSize 0.001)
+    qty = Math.max(0.001, Math.min(qty, 10));
+    qty = Math.floor(qty * 1000) / 1000;
 
-// Auf 3 Dezimalstellen runden (Bybit erlaubt z. B. 0.001-Schritte)
-qty = Math.floor(qty * 1000) / 1000;
+    console.log(
+      `💰 Calculated qty: ${qty} BTC (Margin: ${marginUsed.toFixed(
+        2
+      )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
+    );
 
-console.log(
-  `💰 Calculated qty: ${qty} BTC (Margin: ${marginUsed.toFixed(
-    2
-  )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
-);
+    // === Schritt 2: Leverage setzen (Sicherheitsmaßnahme) ===
+    try {
+      const leverageRes = await sendSignedRequest(
+        `${BASE_URL}/v5/position/set-leverage`,
+        {
+          category: "linear",
+          symbol,
+          buyLeverage: leverage.toString(),
+          sellLeverage: leverage.toString()
+        },
+        API_KEY,
+        API_SECRET
+      );
+      console.log("Leverage set response:", JSON.stringify(leverageRes, null, 2));
+    } catch (levErr) {
+      console.warn("⚠️ Could not set leverage:", levErr.message);
+    }
 
-
-
-    // === Schritt 2: Market Entry ===
+    // === Schritt 3: Market Entry ===
     const orderRes = await sendSignedRequest(
       `${BASE_URL}/v5/order/create`,
       {
@@ -135,7 +149,7 @@ console.log(
     return res.json({
       ok: true,
       message: `Opened ${side} ${symbol} @${price}`,
-      leverage: lvg,
+      leverage,
       qty,
       accountTypeUsed,
       bybitResponse: orderRes
@@ -150,7 +164,7 @@ console.log(
   }
 });
 
-/** === Helper: signierter Bybit POST-Request === */
+/** === Helper: signierter POST-Request (Bybit) === */
 async function sendSignedRequest(url, params, apiKey, apiSecret) {
   const timestamp = Date.now().toString();
   const recvWindow = "5000";
@@ -184,7 +198,7 @@ async function sendSignedRequest(url, params, apiKey, apiSecret) {
   }
 }
 
-/** === Helper: signierter Bybit GET-Request (für Balance) === */
+/** === Helper: signierter GET-Request (Bybit Balance) === */
 async function sendSignedGETRequest(url, params, apiKey, apiSecret) {
   const timestamp = Date.now().toString();
   const recvWindow = "5000";
