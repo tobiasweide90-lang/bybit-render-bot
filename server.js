@@ -89,7 +89,7 @@ app.post("/", async (req, res) => {
       throw new Error("No available USDT balance or invalid API response.");
 
 // === Schritt 1.1: Margin- und Hebel-basierte Positionsgröße ===
-const marginFraction = 0.95;
+const marginFraction = 0.90;
 const leverage = Number(lvg) || 1;
 
 const marginUsed = usdtBalance * marginFraction;
