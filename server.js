@@ -88,14 +88,29 @@ app.post("/", async (req, res) => {
     if (usdtBalance <= 0)
       throw new Error("No available USDT balance or invalid API response.");
 
-    const marginFraction = 0.95;
-    const tradeValue = usdtBalance * marginFraction;
+// === Schritt 1.1: Margin- und Hebel-basierte Positionsgröße ===
+const marginFraction = 0.95;
+const leverage = Number(lvg) || 1; // aus TradingView-Alert, default 1
 
-    let qty = tradeValue / price;
-    qty = Math.max(0.001, Math.min(qty, 10));
-    qty = Number(qty.toFixed(4));
+// verfügbare Margin (95 % deines Wallets)
+const marginUsed = usdtBalance * marginFraction;
 
-    console.log(`💰 Calculated qty: ${qty} BTC from balance ${usdtBalance} USDT`);
+// daraus wird der Positionswert (inkl. Leverage)
+const positionValue = marginUsed * leverage;
+
+// BTC-Menge berechnen
+let qty = positionValue / price;
+
+// Sicherheitslimits & Rundung
+qty = Math.max(0.001, Math.min(qty, 10));
+qty = Number(qty.toFixed(4));
+
+console.log(
+  `💰 Calculated qty: ${qty} BTC (Margin: ${marginUsed.toFixed(
+    2
+  )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
+);
+
 
     // === Schritt 2: Market Entry ===
     const orderRes = await sendSignedRequest(
