@@ -90,26 +90,26 @@ app.post("/", async (req, res) => {
 
 // === Schritt 1.1: Margin- und Hebel-basierte Positionsgröße ===
 const marginFraction = 0.95;
-const leverage = Number(lvg) || 1; // aus TradingView-Alert, default 1
+const leverage = Number(lvg) || 1;
 
-// verfügbare Margin (95 % deines Wallets)
 const marginUsed = usdtBalance * marginFraction;
-
-// daraus wird der Positionswert (inkl. Leverage)
 const positionValue = marginUsed * leverage;
 
 // BTC-Menge berechnen
 let qty = positionValue / price;
 
-// Sicherheitslimits & Rundung
+// Sicherheitslimits
 qty = Math.max(0.001, Math.min(qty, 10));
-qty = Number(qty.toFixed(4));
+
+// Auf 3 Dezimalstellen runden (Bybit erlaubt z. B. 0.001-Schritte)
+qty = Math.floor(qty * 1000) / 1000;
 
 console.log(
   `💰 Calculated qty: ${qty} BTC (Margin: ${marginUsed.toFixed(
     2
   )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
 );
+
 
 
     // === Schritt 2: Market Entry ===
