@@ -1,8 +1,7 @@
 /**
  * Render Server – PeakAlgo Scalp (TradingView → Bybit)
  * Market Entry + ATR-based TP/SL + dynamic 95% qty + logging
- * Auto-detects Unified vs Contract account type
- * Compatible with UTA / Contract APIs (Node 18+ / Render)
+ * Fixed UTA Balance Fetch (GET-based)
  */
 
 import express from "express";
@@ -53,13 +52,12 @@ app.post("/", async (req, res) => {
     console.log({ event, side, symbol, price, tp, sl, lvg });
     console.log("===================");
 
-    // === Schritt 1: 95 % Positionsgröße berechnen (auto detect account type) ===
+    // === Schritt 1: Balance holen (UTA via GET) ===
     let balanceRes;
     let accountTypeUsed = "UNIFIED";
 
     try {
-      // UTA-kompatibler Endpunkt
-      balanceRes = await sendSignedRequest(
+      balanceRes = await sendSignedGETRequest(
         `${BASE_URL}/v5/asset/transfer/query-account-coin-balance`,
         { accountType: "UNIFIED", coin: "USDT" },
         API_KEY,
@@ -68,7 +66,7 @@ app.post("/", async (req, res) => {
       if (balanceRes.retCode !== 0) throw new Error("Invalid UNIFIED response");
     } catch (err) {
       console.warn("⚠️ UNIFIED failed, retrying with CONTRACT...");
-      balanceRes = await sendSignedRequest(
+      balanceRes = await sendSignedGETRequest(
         `${BASE_URL}/v5/asset/transfer/query-account-coin-balance`,
         { accountType: "CONTRACT", coin: "USDT" },
         API_KEY,
@@ -137,7 +135,7 @@ app.post("/", async (req, res) => {
   }
 });
 
-/** === Helper: signierter Bybit-Request === */
+/** === Helper: signierter Bybit POST-Request === */
 async function sendSignedRequest(url, params, apiKey, apiSecret) {
   const timestamp = Date.now().toString();
   const recvWindow = "5000";
@@ -159,6 +157,39 @@ async function sendSignedRequest(url, params, apiKey, apiSecret) {
       "X-BAPI-SIGN": signature
     },
     body: searchParams
+  });
+
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    console.error("⚠️ Bybit non-JSON response for:", url);
+    console.error(text.slice(0, 400));
+    throw new Error(`Bybit returned non-JSON response (${res.status})`);
+  }
+}
+
+/** === Helper: signierter Bybit GET-Request (für Balance) === */
+async function sendSignedGETRequest(url, params, apiKey, apiSecret) {
+  const timestamp = Date.now().toString();
+  const recvWindow = "5000";
+  const searchParams = new URLSearchParams(params).toString();
+  const preSign = timestamp + apiKey + recvWindow + searchParams;
+  const signature = crypto
+    .createHmac("sha256", apiSecret)
+    .update(preSign)
+    .digest("hex");
+
+  const fullUrl = `${url}?${searchParams}`;
+  const res = await fetch(fullUrl, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "X-BAPI-API-KEY": apiKey,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": recvWindow,
+      "X-BAPI-SIGN": signature
+    }
   });
 
   const text = await res.text();
