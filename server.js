@@ -1,93 +1,147 @@
+/**
+ * Render Server – PeakAlgo Scalp (TradingView → Bybit)
+ * Market Entry + ATR-based TP/SL + dynamic 95% qty + logging
+ */
+
 import express from "express";
-import axios from "axios";
+import fetch from "node-fetch";
 import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
-// Sicherheits-Secret für TV
-const SECRET = "S1ckline2012";
-
 app.post("/", async (req, res) => {
   try {
     const data = req.body;
+    const SECRET = process.env.SECRET || "S1ckline2012";
 
-    if (data.secret !== SECRET) {
+    if (data.secret !== SECRET)
       return res.status(403).json({ ok: false, error: "Unauthorized" });
-    }
 
-    const { event, symbol, price, sl, tp, lvg } = data;
+    const { event, symbol, price, lvg } = data;
     if (!event || !symbol || !price)
       return res.status(400).json({ ok: false, error: "Missing fields" });
 
+    // === Credentials & API URL ===
+    const API_KEY = process.env.BYBIT_API_KEY;
+    const API_SECRET = process.env.BYBIT_API_SECRET;
+    const BASE_URL = (process.env.BYBIT_API_URL || "https://api.bybit.com")
+      .trim()
+      .replace(/\s+/g, "")
+      .replace(/\/+$/, "");
+
+    if (!API_KEY || !API_SECRET)
+      throw new Error("Missing Bybit API credentials.");
+
+    // === Side bestimmen ===
     const side = event.includes("LONG")
       ? "Buy"
       : event.includes("SHORT")
       ? "Sell"
       : null;
+    if (!side)
+      return res.status(400).json({ ok: false, error: "Invalid event" });
 
-    if (!side) return res.status(400).json({ ok: false, error: "Invalid event" });
+    // === TP/SL übernehmen (von TV oder fallback) ===
+    let tp = data.tp || (side === "Buy" ? price * 1.003 : price * 0.997);
+    let sl = data.sl || (side === "Buy" ? price * 0.997 : price * 1.003);
 
-    const qty = 0.001; // Beispielmenge
-    const BASE_URL = process.env.BYBIT_API_URL?.trim().replace(/\s+/g, "") || "https://api.bytick.com";
+    tp = parseFloat(tp).toFixed(2);
+    sl = parseFloat(sl).toFixed(2);
 
-    const API_KEY = process.env.BYBIT_API_KEY;
-    const API_SECRET = process.env.BYBIT_API_SECRET;
-    if (!API_KEY || !API_SECRET)
-      throw new Error("API credentials missing");
+    console.log("=== ORDER START ===");
+    console.log({ event, side, symbol, price, tp, sl, lvg });
+    console.log("===================");
 
-    // Fallback für TP/SL falls TV keine schickt
-    let takeProfit = tp || (side === "Buy" ? price * 1.003 : price * 0.997);
-    let stopLoss = sl || (side === "Buy" ? price * 0.997 : price * 1.003);
-    takeProfit = parseFloat(takeProfit).toFixed(2);
-    stopLoss = parseFloat(stopLoss).toFixed(2);
+    // === Schritt 1: 95 % Positionsgröße berechnen ===
+    const balanceRes = await sendSignedRequest(
+      `${BASE_URL}/v5/account/wallet-balance`,
+      { accountType: "UNIFIED" },
+      API_KEY,
+      API_SECRET
+    );
 
-    // --- Signierung ---
-    const timestamp = Date.now().toString();
-    const recvWindow = "5000";
-    const body = new URLSearchParams({
-      category: "linear",
-      symbol,
-      side,
-      orderType: "Market",
-      qty: qty.toString(),
-      timeInForce: "GTC",
-      takeProfit,
-      stopLoss,
-      positionIdx: "0"
-    }).toString();
+    const usdtBalance =
+      parseFloat(
+        balanceRes.result?.list?.[0]?.coin?.find(c => c.coin === "USDT")?.availableToWithdraw
+      ) || 0;
 
-    const preSign = timestamp + API_KEY + recvWindow + body;
-    const sign = crypto.createHmac("sha256", API_SECRET).update(preSign).digest("hex");
+    const marginFraction = 0.95;
+    const tradeValue = usdtBalance * marginFraction;
+    const qty = Math.min((tradeValue / price).toFixed(4), 0.1); // max 0.1 BTC Sicherheitslimit
 
-    const resp = await axios.post(`${BASE_URL}/v5/order/create`, body, {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recvWindow,
-        "X-BAPI-SIGN": sign,
-        // Bypass headers
-        "Origin": "https://www.bybit.com",
-        "Referer": "https://www.bybit.com/",
-        "User-Agent": "Mozilla/5.0 (Render Bot)"
-      }
-    });
+    // === Schritt 2: Market Entry ===
+    const orderRes = await sendSignedRequest(
+      `${BASE_URL}/v5/order/create`,
+      {
+        category: "linear",
+        symbol,
+        side,
+        orderType: "Market",
+        qty: qty.toString(),
+        timeInForce: "GTC",
+        takeProfit: tp,
+        stopLoss: sl,
+        positionIdx: 0,
+      },
+      API_KEY,
+      API_SECRET
+    );
 
-    res.json({
+    return res.json({
       ok: true,
       message: `Opened ${side} ${symbol} @${price}`,
-      bybitResponse: resp.data
+      leverage: lvg,
+      qty,
+      bybitResponse: orderRes,
     });
   } catch (err) {
-    console.error("Error:", err.response?.data || err.message);
-    res.status(500).json({
+    console.error("Worker Error:", err);
+    return res.status(500).json({
       ok: false,
-      error: err.response?.data || err.message
+      error: err.message,
+      stack: err.stack,
     });
   }
 });
 
-// Render nutzt Port von Env-Var PORT
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Bot listening on port ${PORT}`));
+/** === Helper: signierter Bybit-Request === */
+async function sendSignedRequest(url, params, apiKey, apiSecret) {
+  const timestamp = Date.now().toString();
+  const recvWindow = "5000";
+  const searchParams = new URLSearchParams(params).toString();
+  const preSign = timestamp + apiKey + recvWindow + searchParams;
+  const signature = crypto
+    .createHmac("sha256", apiSecret)
+    .update(preSign)
+    .digest("hex");
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-BAPI-API-KEY": apiKey,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": recvWindow,
+      "X-BAPI-SIGN": signature,
+      Origin: "https://www.bybit.com",
+      Referer: "https://www.bybit.com/",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+    body: searchParams,
+  });
+
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    console.error("⚠️ Bybit non-JSON response for:", url);
+    console.error(text.slice(0, 400));
+    throw new Error(`Bybit returned non-JSON response (${res.status})`);
+  }
+}
+
+app.listen(10000, () => console.log("✅ PeakAlgo Render bot online"));
