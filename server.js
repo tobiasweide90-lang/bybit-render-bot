@@ -60,6 +60,7 @@ app.post("/", async (req, res) => {
       API_KEY,
       API_SECRET
     );
+console.log("Balance Response:", JSON.stringify(balanceRes, null, 2));
 
     const usdtBalance =
       parseFloat(
