@@ -1,6 +1,7 @@
 {
   "name": "bybit-render-bot",
   "version": "1.0.0",
+  "description": "TradingView Alert Handler for Bybit (Render Deploy)",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -10,5 +11,8 @@
     "express": "^4.18.2",
     "axios": "^1.6.8",
     "crypto-js": "^4.2.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

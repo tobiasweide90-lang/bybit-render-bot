@@ -1,10 +1,10 @@
 /**
  * Render Server – PeakAlgo Scalp (TradingView → Bybit)
  * Market Entry + ATR-based TP/SL + dynamic 95% qty + logging
+ * Node 18+ / 22 compatible (native fetch)
  */
 
 import express from "express";
-import fetch from "node-fetch";
 import crypto from "crypto";
 
 const app = express();
@@ -60,18 +60,35 @@ app.post("/", async (req, res) => {
       API_KEY,
       API_SECRET
     );
-console.log("Balance Response:", JSON.stringify(balanceRes, null, 2));
+
+    console.log("Balance Response:", JSON.stringify(balanceRes, null, 2));
 
     const usdtBalance =
       parseFloat(
-        balanceRes.result?.list?.[0]?.coin?.find(c => c.coin === "USDT")?.availableToWithdraw
+        balanceRes.result?.list?.[0]?.coin?.find(c => c.coin === "USDT")
+          ?.availableToWithdraw
       ) || 0;
 
+    if (usdtBalance <= 0) throw new Error("No available USDT balance.");
+
+    // 95 % des Balances verwenden
     const marginFraction = 0.95;
     const tradeValue = usdtBalance * marginFraction;
-    const qty = Math.min((tradeValue / price).toFixed(4), 0.1); // max 0.1 BTC Sicherheitslimit
 
-    // === Schritt 2: Market Entry ===
+    // BTC-Menge berechnen
+    let qty = tradeValue / price;
+
+    // Mindest-/Maximalwerte für Sicherheit
+    const minQty = 0.001; // Bybit-Minimum
+    const maxQty = 10; // optionales Sicherheitslimit
+    qty = Math.max(minQty, Math.min(qty, maxQty));
+
+    // numerisch auf 4 Nachkommastellen runden
+    qty = Number(qty.toFixed(4));
+
+    console.log(`💰 Calculated qty: ${qty} BTC from balance ${usdtBalance} USDT`);
+
+    // === Schritt 2: Market-Entry-Order ===
     const orderRes = await sendSignedRequest(
       `${BASE_URL}/v5/order/create`,
       {
@@ -83,25 +100,27 @@ console.log("Balance Response:", JSON.stringify(balanceRes, null, 2));
         timeInForce: "GTC",
         takeProfit: tp,
         stopLoss: sl,
-        positionIdx: 0,
+        positionIdx: 0
       },
       API_KEY,
       API_SECRET
     );
+
+    console.log("Order Response:", JSON.stringify(orderRes, null, 2));
 
     return res.json({
       ok: true,
       message: `Opened ${side} ${symbol} @${price}`,
       leverage: lvg,
       qty,
-      bybitResponse: orderRes,
+      bybitResponse: orderRes
     });
   } catch (err) {
     console.error("Worker Error:", err);
     return res.status(500).json({
       ok: false,
       error: err.message,
-      stack: err.stack,
+      stack: err.stack
     });
   }
 });
@@ -130,9 +149,9 @@ async function sendSignedRequest(url, params, apiKey, apiSecret) {
       Referer: "https://www.bybit.com/",
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
+      "Accept-Language": "en-US,en;q=0.9"
     },
-    body: searchParams,
+    body: searchParams
   });
 
   const text = await res.text();
