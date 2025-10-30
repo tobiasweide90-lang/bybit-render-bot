@@ -1,7 +1,7 @@
 /**
  * Render Server – PeakAlgo Scalp (TradingView → Bybit)
  * Market Entry + ATR-based TP/SL + dynamic 95% qty + logging
- * Node 18+ / 22 compatible (native fetch)
+ * Auto-detects Unified vs Contract account type
  */
 
 import express from "express";
@@ -45,7 +45,6 @@ app.post("/", async (req, res) => {
     // === TP/SL übernehmen (von TV oder fallback) ===
     let tp = data.tp || (side === "Buy" ? price * 1.003 : price * 0.997);
     let sl = data.sl || (side === "Buy" ? price * 0.997 : price * 1.003);
-
     tp = parseFloat(tp).toFixed(2);
     sl = parseFloat(sl).toFixed(2);
 
@@ -53,15 +52,33 @@ app.post("/", async (req, res) => {
     console.log({ event, side, symbol, price, tp, sl, lvg });
     console.log("===================");
 
-    // === Schritt 1: 95 % Positionsgröße berechnen ===
-    const balanceRes = await sendSignedRequest(
-      `${BASE_URL}/v5/account/wallet-balance`,
-      { accountType: "UNIFIED" },
-      API_KEY,
-      API_SECRET
-    );
+    // === Schritt 1: 95 % Positionsgröße berechnen (auto detect account type) ===
+    let balanceRes;
+    let accountTypeUsed = "UNIFIED";
 
-    console.log("Balance Response:", JSON.stringify(balanceRes, null, 2));
+    try {
+      balanceRes = await sendSignedRequest(
+        `${BASE_URL}/v5/account/wallet-balance`,
+        { accountType: "UNIFIED" },
+        API_KEY,
+        API_SECRET
+      );
+      if (balanceRes.retCode !== 0) throw new Error("Invalid UNIFIED response");
+    } catch (err) {
+      console.warn("⚠️ UNIFIED failed, retrying with CONTRACT...");
+      balanceRes = await sendSignedRequest(
+        `${BASE_URL}/v5/account/wallet-balance`,
+        { accountType: "CONTRACT" },
+        API_KEY,
+        API_SECRET
+      );
+      accountTypeUsed = "CONTRACT";
+    }
+
+    console.log(
+      `✅ Using accountType: ${accountTypeUsed}`,
+      JSON.stringify(balanceRes, null, 2)
+    );
 
     const usdtBalance =
       parseFloat(
@@ -71,24 +88,16 @@ app.post("/", async (req, res) => {
 
     if (usdtBalance <= 0) throw new Error("No available USDT balance.");
 
-    // 95 % des Balances verwenden
     const marginFraction = 0.95;
     const tradeValue = usdtBalance * marginFraction;
 
-    // BTC-Menge berechnen
     let qty = tradeValue / price;
-
-    // Mindest-/Maximalwerte für Sicherheit
-    const minQty = 0.001; // Bybit-Minimum
-    const maxQty = 10; // optionales Sicherheitslimit
-    qty = Math.max(minQty, Math.min(qty, maxQty));
-
-    // numerisch auf 4 Nachkommastellen runden
+    qty = Math.max(0.001, Math.min(qty, 10));
     qty = Number(qty.toFixed(4));
 
     console.log(`💰 Calculated qty: ${qty} BTC from balance ${usdtBalance} USDT`);
 
-    // === Schritt 2: Market-Entry-Order ===
+    // === Schritt 2: Market Entry ===
     const orderRes = await sendSignedRequest(
       `${BASE_URL}/v5/order/create`,
       {
@@ -113,6 +122,7 @@ app.post("/", async (req, res) => {
       message: `Opened ${side} ${symbol} @${price}`,
       leverage: lvg,
       qty,
+      accountTypeUsed,
       bybitResponse: orderRes
     });
   } catch (err) {
@@ -144,12 +154,7 @@ async function sendSignedRequest(url, params, apiKey, apiSecret) {
       "X-BAPI-API-KEY": apiKey,
       "X-BAPI-TIMESTAMP": timestamp,
       "X-BAPI-RECV-WINDOW": recvWindow,
-      "X-BAPI-SIGN": signature,
-      Origin: "https://www.bybit.com",
-      Referer: "https://www.bybit.com/",
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9"
+      "X-BAPI-SIGN": signature
     },
     body: searchParams
   });
