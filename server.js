@@ -2,6 +2,7 @@
  * Render Server – PeakAlgo Scalp (TradingView → Bybit)
  * Market Entry + ATR-based TP/SL + dynamic 95% qty + logging
  * Auto-detects Unified vs Contract account type
+ * Compatible with UTA / Contract APIs (Node 18+ / Render)
  */
 
 import express from "express";
@@ -57,9 +58,10 @@ app.post("/", async (req, res) => {
     let accountTypeUsed = "UNIFIED";
 
     try {
+      // UTA-kompatibler Endpunkt
       balanceRes = await sendSignedRequest(
-        `${BASE_URL}/v5/account/wallet-balance`,
-        { accountType: "UNIFIED" },
+        `${BASE_URL}/v5/asset/transfer/query-account-coin-balance`,
+        { accountType: "UNIFIED", coin: "USDT" },
         API_KEY,
         API_SECRET
       );
@@ -67,8 +69,8 @@ app.post("/", async (req, res) => {
     } catch (err) {
       console.warn("⚠️ UNIFIED failed, retrying with CONTRACT...");
       balanceRes = await sendSignedRequest(
-        `${BASE_URL}/v5/account/wallet-balance`,
-        { accountType: "CONTRACT" },
+        `${BASE_URL}/v5/asset/transfer/query-account-coin-balance`,
+        { accountType: "CONTRACT", coin: "USDT" },
         API_KEY,
         API_SECRET
       );
@@ -81,12 +83,12 @@ app.post("/", async (req, res) => {
     );
 
     const usdtBalance =
-      parseFloat(
-        balanceRes.result?.list?.[0]?.coin?.find(c => c.coin === "USDT")
-          ?.availableToWithdraw
-      ) || 0;
+      parseFloat(balanceRes.result?.balance?.transferBalance) ||
+      parseFloat(balanceRes.result?.balance?.walletBalance) ||
+      0;
 
-    if (usdtBalance <= 0) throw new Error("No available USDT balance.");
+    if (usdtBalance <= 0)
+      throw new Error("No available USDT balance or invalid API response.");
 
     const marginFraction = 0.95;
     const tradeValue = usdtBalance * marginFraction;
