@@ -44,7 +44,7 @@ app.post("/", async (req, res) => {
 
     // === TP/SL übernehmen (von TV oder Fallback) ===
     let tp = data.tp || (side === "Buy" ? price * 1.003 : price * 0.997);
-    let sl = data.sl || (side === "Buy" ? price * 0.997 : price * 1.003);
+    let sl = data.sl || (side === "Buy" ? price * 0.92 : price * 1.08); // 8% Safety SL
     tp = parseFloat(tp).toFixed(2);
     sl = parseFloat(sl).toFixed(2);
 
