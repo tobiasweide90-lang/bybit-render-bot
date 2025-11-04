@@ -1,8 +1,7 @@
 /**
- * PeakAlgo Render Bot – ETHUSDT.P 50m
- * TradingView → Bybit (Unified)
- * 95 % position size × 3x leverage
- * Market entry + TP/SL
+ * ETH-PeakAlgo Render Bot – TradingView → Bybit
+ * Market Entry + Fixed TP/SL + 95% sizing + 3x leverage
+ * Auto-symbol cleanup (.P → '') for TradingView symbols
  */
 
 import express from "express";
@@ -11,8 +10,12 @@ import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
+
 const PORT = process.env.PORT || 10000;
 
+//──────────────────────────────────────────────
+// Main route: TradingView → Bybit
+//──────────────────────────────────────────────
 app.post("/", async (req, res) => {
   try {
     const data = req.body;
@@ -20,9 +23,12 @@ app.post("/", async (req, res) => {
     if (data.secret !== SECRET)
       return res.status(403).json({ ok: false, error: "Unauthorized" });
 
-    const { event, symbol, price } = data;
+    let { event, symbol, price, lvg } = data;
     if (!event || !symbol || !price)
       return res.status(400).json({ ok: false, error: "Missing fields" });
+
+    // Auto-clean TradingView symbols (remove ".P" or "PERP")
+    const cleanSymbol = symbol.replace(".P", "").replace("PERP", "").toUpperCase();
 
     const side = event.includes("LONG")
       ? "Buy"
@@ -40,19 +46,24 @@ app.post("/", async (req, res) => {
       .replace(/\/+$/, "");
 
     const ACCOUNT_TYPE = process.env.ACCOUNT_TYPE || "UNIFIED";
-    const marginFraction = 0.95;
-    const leverage = 3;
+    const marginFraction = 0.95; // use 95% of wallet balance
+    const leverage = Number(lvg) || 3;
 
+    console.log("///////////////////////////////////////////////////////////");
     console.log("=== ETH-BOT ORDER START ===");
-    console.log({ event, side, symbol, price, leverage });
+    console.log({ event, side, symbol, cleanSymbol, price, leverage, marginFraction });
+    console.log("===========================");
 
-    // === Step 1 – Wallet Balance ===
-    const balanceRes = await signedGET(
+    //──────────────────────────────────────────────
+    // 1️⃣ Wallet balance (Unified account)
+    //──────────────────────────────────────────────
+    const balanceRes = await sendSignedGETRequest(
       `${BASE_URL}/v5/account/wallet-balance`,
       { accountType: ACCOUNT_TYPE, coin: "USDT" },
       API_KEY,
       API_SECRET
     );
+
     if (balanceRes.retCode !== 0)
       throw new Error(`Balance error: ${balanceRes.retMsg}`);
 
@@ -64,53 +75,71 @@ app.post("/", async (req, res) => {
       parseFloat(usdt.equity) ||
       0;
 
-    console.log(`💰 Wallet balance: ${usdtBalance.toFixed(2)} USDT`);
+    console.log(
+      `💰 Wallet balance detected: ${usdtBalance.toFixed(4)} USDT (accountType=${ACCOUNT_TYPE})`
+    );
 
     if (usdtBalance <= 0)
       throw new Error("No available USDT balance or invalid API response.");
 
-    // === Step 2 – Positionsgröße ===
+    //──────────────────────────────────────────────
+    // 2️⃣ Calculate position size (95% × 3x)
+    //──────────────────────────────────────────────
     const marginUsed = usdtBalance * marginFraction;
     const positionValue = marginUsed * leverage;
     let qty = positionValue / price;
 
-    // ETH Kontrakt → min 0.001 ETH
-    qty = Math.max(0.001, Math.min(qty, 1000));
+    // ETH step size = 0.001
+    qty = Math.max(0.001, Math.min(qty, 100));
     qty = Math.floor(qty * 1000) / 1000;
 
     console.log(
-      `💰 Qty ≈ ${qty} ETH | Margin ${marginUsed.toFixed(
+      `💰 Calculated qty: ${qty} ETH (Margin: ${marginUsed.toFixed(
         2
-      )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total`
+      )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
     );
 
-    // === Step 3 – Leverage setzen ===
+    //──────────────────────────────────────────────
+    // 3️⃣ Set leverage (optional)
+    //──────────────────────────────────────────────
     try {
-      const lev = await signedPOST(
+      const levRes = await sendSignedPOST(
         `${BASE_URL}/v5/position/set-leverage`,
         {
           category: "linear",
-          symbol,
+          symbol: cleanSymbol,
           buyLeverage: leverage.toString(),
           sellLeverage: leverage.toString(),
         },
         API_KEY,
         API_SECRET
       );
-      console.log("✅ Leverage-Set:", lev.retMsg);
-    } catch (e) {
-      console.warn("⚠️ set-leverage failed:", e.message);
+      console.log("✅ Leverage response:", levRes.retMsg);
+    } catch (err) {
+      console.warn("⚠️ set-leverage failed:", err.message);
     }
 
-    // === Step 4 – Market-Entry + TP/SL ===
-    const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2); // +2.72 %
-    const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2);     // –9 %
+    //──────────────────────────────────────────────
+    // 4️⃣ Place Market Order + TP/SL (fixed %)
+    //──────────────────────────────────────────────
+    const TP_PCT = 2.72;
+    const SL_PCT = 9.0;
 
-    const order = await signedPOST(
+    const tp = (side === "Buy"
+      ? price * (1 + TP_PCT / 100)
+      : price * (1 - TP_PCT / 100)
+    ).toFixed(2);
+
+    const sl = (side === "Buy"
+      ? price * (1 - SL_PCT / 100)
+      : price * (1 + SL_PCT / 100)
+    ).toFixed(2);
+
+    const orderRes = await sendSignedPOST(
       `${BASE_URL}/v5/order/create`,
       {
         category: "linear",
-        symbol,
+        symbol: cleanSymbol,
         side,
         orderType: "Market",
         qty: qty.toString(),
@@ -124,65 +153,73 @@ app.post("/", async (req, res) => {
       API_SECRET
     );
 
-    console.log("📤 Order Response:", JSON.stringify(order, null, 2));
+    console.log("📤 Order Response:", JSON.stringify(orderRes, null, 2));
 
     return res.json({
       ok: true,
-      message: `Opened ${side} ${symbol} @ ${price}`,
+      message: `Opened ${side} ${cleanSymbol} @ ${price}`,
       qty,
       leverage,
       tp,
       sl,
-      bybitResponse: order,
+      bybitResponse: orderRes,
     });
   } catch (err) {
-    console.error("Worker Error:", err);
+    console.error("❌ Worker Error:", err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-/* ===== Sign-Helper ===== */
-async function signedGET(url, params, apiKey, apiSecret) {
-  const ts = Date.now().toString();
-  const recv = "5000";
-  const q = new URLSearchParams(params).toString();
-  const pre = ts + apiKey + recv + q;
-  const sig = crypto.createHmac("sha256", apiSecret).update(pre).digest("hex");
-  const r = await fetch(`${url}?${q}`, {
+//──────────────────────────────────────────────
+// Helper functions for signed API calls
+//──────────────────────────────────────────────
+async function sendSignedGETRequest(url, params, apiKey, apiSecret) {
+  const timestamp = Date.now().toString();
+  const recvWindow = "5000";
+  const query = new URLSearchParams(params).toString();
+  const preSign = timestamp + apiKey + recvWindow + query;
+  const sign = crypto.createHmac("sha256", apiSecret).update(preSign).digest("hex");
+
+  const res = await fetch(`${url}?${query}`, {
     method: "GET",
     headers: {
       Accept: "application/json",
       "X-BAPI-API-KEY": apiKey,
-      "X-BAPI-TIMESTAMP": ts,
-      "X-BAPI-RECV-WINDOW": recv,
-      "X-BAPI-SIGN": sig,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": recvWindow,
+      "X-BAPI-SIGN": sign,
     },
   });
-  return await r.json();
+  const text = await res.text();
+  return JSON.parse(text);
 }
 
-async function signedPOST(url, body, apiKey, apiSecret) {
-  const ts = Date.now().toString();
-  const recv = "5000";
-  const str = JSON.stringify(body);
-  const pre = ts + apiKey + recv + str;
-  const sig = crypto.createHmac("sha256", apiSecret).update(pre).digest("hex");
-  const r = await fetch(url, {
+async function sendSignedPOST(url, body, apiKey, apiSecret) {
+  const timestamp = Date.now().toString();
+  const recvWindow = "5000";
+  const bodyStr = JSON.stringify(body);
+  const preSign = timestamp + apiKey + recvWindow + bodyStr;
+  const sign = crypto.createHmac("sha256", apiSecret).update(preSign).digest("hex");
+
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
       "X-BAPI-API-KEY": apiKey,
-      "X-BAPI-TIMESTAMP": ts,
-      "X-BAPI-RECV-WINDOW": recv,
-      "X-BAPI-SIGN": sig,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": recvWindow,
+      "X-BAPI-SIGN": sign,
     },
-    body: str,
+    body: bodyStr,
   });
-  return await r.json();
+  const text = await res.text();
+  return JSON.parse(text);
 }
 
-/* ===== Server-Start ===== */
+//──────────────────────────────────────────────
+// Start server
+//──────────────────────────────────────────────
 app.listen(PORT, () =>
   console.log(`✅ ETH-PeakAlgo Render-Bot listening on port ${PORT}`)
 );
