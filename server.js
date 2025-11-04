@@ -1,39 +1,29 @@
 /**
- * PeakAlgo Render Bot – TradingView → Bybit
- * Market Entry + ATR-based TP/SL + dynamic 90% qty + leverage + logging
- * Compatible with Unified Trading Account (UTA) & Contract
+ * PeakAlgo Render Bot – ETHUSDT.P 50m
+ * TradingView → Bybit (Unified)
+ * 95 % position size × 3x leverage
+ * Market entry + TP/SL
  */
 
 import express from "express";
 import crypto from "crypto";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
+const PORT = process.env.PORT || 10000;
 
 app.post("/", async (req, res) => {
   try {
     const data = req.body;
     const SECRET = process.env.SECRET || "S1ckline2012";
-
     if (data.secret !== SECRET)
       return res.status(403).json({ ok: false, error: "Unauthorized" });
 
-    const { event, symbol, price, lvg } = data;
+    const { event, symbol, price } = data;
     if (!event || !symbol || !price)
       return res.status(400).json({ ok: false, error: "Missing fields" });
 
-    // === API Credentials & Base URL ===
-    const API_KEY = process.env.BYBIT_API_KEY;
-    const API_SECRET = process.env.BYBIT_API_SECRET;
-    const BASE_URL = (process.env.BYBIT_API_URL || "https://api.bybit.com")
-      .trim()
-      .replace(/\s+/g, "")
-      .replace(/\/+$/, "");
-
-    if (!API_KEY || !API_SECRET)
-      throw new Error("Missing Bybit API credentials.");
-
-    // === Side bestimmen ===
     const side = event.includes("LONG")
       ? "Buy"
       : event.includes("SHORT")
@@ -42,92 +32,81 @@ app.post("/", async (req, res) => {
     if (!side)
       return res.status(400).json({ ok: false, error: "Invalid event" });
 
-    // === TP/SL übernehmen (von TV oder Fallback) ===
-    let tp = data.tp || (side === "Buy" ? price * 1.003 : price * 0.997);
-    let sl = data.sl || (side === "Buy" ? price * 0.92 : price * 1.08); // 8% Safety SL
-    tp = parseFloat(tp).toFixed(2);
-    sl = parseFloat(sl).toFixed(2);
+    const API_KEY = process.env.BYBIT_API_KEY;
+    const API_SECRET = process.env.BYBIT_API_SECRET;
+    const BASE_URL = (process.env.BYBIT_API_URL || "https://api.bybit.com")
+      .trim()
+      .replace(/\s+/g, "")
+      .replace(/\/+$/, "");
 
-    console.log("///////////////////////////////////////////////////////////");
-    console.log("=== ORDER START ===");
-    console.log({ event, side, symbol, price, tp, sl, lvg });
-    console.log("===================");
+    const ACCOUNT_TYPE = process.env.ACCOUNT_TYPE || "UNIFIED";
+    const marginFraction = 0.95;
+    const leverage = 3;
 
-    // === Schritt 1: Balance holen (UTA via GET) ===
-    let balanceRes;
-    let accountTypeUsed = "UNIFIED";
+    console.log("=== ETH-BOT ORDER START ===");
+    console.log({ event, side, symbol, price, leverage });
 
-    try {
-      balanceRes = await sendSignedGETRequest(
-        `${BASE_URL}/v5/asset/transfer/query-account-coin-balance`,
-        { accountType: "UNIFIED", coin: "USDT" },
-        API_KEY,
-        API_SECRET
-      );
-      if (balanceRes.retCode !== 0) throw new Error("Invalid UNIFIED response");
-    } catch (err) {
-      console.warn("⚠️ UNIFIED failed, retrying with CONTRACT...");
-      balanceRes = await sendSignedGETRequest(
-        `${BASE_URL}/v5/asset/transfer/query-account-coin-balance`,
-        { accountType: "CONTRACT", coin: "USDT" },
-        API_KEY,
-        API_SECRET
-      );
-      accountTypeUsed = "CONTRACT";
-    }
-
-    console.log(
-      `✅ Using accountType: ${accountTypeUsed}`,
-      JSON.stringify(balanceRes, null, 2)
+    // === Step 1 – Wallet Balance ===
+    const balanceRes = await signedGET(
+      `${BASE_URL}/v5/account/wallet-balance`,
+      { accountType: ACCOUNT_TYPE, coin: "USDT" },
+      API_KEY,
+      API_SECRET
     );
+    if (balanceRes.retCode !== 0)
+      throw new Error(`Balance error: ${balanceRes.retMsg}`);
 
+    const coinList = balanceRes.result?.list?.[0]?.coin || [];
+    const usdt = coinList.find((c) => c.coin === "USDT") || {};
     const usdtBalance =
-      parseFloat(balanceRes.result?.balance?.transferBalance) ||
-      parseFloat(balanceRes.result?.balance?.walletBalance) ||
+      parseFloat(usdt.availableToWithdraw) ||
+      parseFloat(usdt.walletBalance) ||
+      parseFloat(usdt.equity) ||
       0;
+
+    console.log(`💰 Wallet balance: ${usdtBalance.toFixed(2)} USDT`);
 
     if (usdtBalance <= 0)
       throw new Error("No available USDT balance or invalid API response.");
 
-    // === Schritt 1.1: Margin- und Hebel-basierte Positionsgröße ===
-    const marginFraction = 0.90; // 90 % des Balances als Margin
-    const leverage = Number(lvg) || 1;
-
+    // === Step 2 – Positionsgröße ===
     const marginUsed = usdtBalance * marginFraction;
     const positionValue = marginUsed * leverage;
-
     let qty = positionValue / price;
 
-    // Sicherheitslimits und korrekte Rundung (Bybit StepSize 0.001)
-    qty = Math.max(0.001, Math.min(qty, 10));
+    // ETH Kontrakt → min 0.001 ETH
+    qty = Math.max(0.001, Math.min(qty, 1000));
     qty = Math.floor(qty * 1000) / 1000;
 
     console.log(
-      `💰 Calculated qty: ${qty} BTC (Margin: ${marginUsed.toFixed(
+      `💰 Qty ≈ ${qty} ETH | Margin ${marginUsed.toFixed(
         2
-      )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
+      )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total`
     );
 
-    // === Schritt 2: Leverage setzen (Sicherheitsmaßnahme) ===
+    // === Step 3 – Leverage setzen ===
     try {
-      const leverageRes = await sendSignedRequest(
+      const lev = await signedPOST(
         `${BASE_URL}/v5/position/set-leverage`,
         {
           category: "linear",
           symbol,
           buyLeverage: leverage.toString(),
-          sellLeverage: leverage.toString()
+          sellLeverage: leverage.toString(),
         },
         API_KEY,
         API_SECRET
       );
-      console.log("Leverage set response:", JSON.stringify(leverageRes, null, 2));
-    } catch (levErr) {
-      console.warn("⚠️ Could not set leverage:", levErr.message);
+      console.log("✅ Leverage-Set:", lev.retMsg);
+    } catch (e) {
+      console.warn("⚠️ set-leverage failed:", e.message);
     }
 
-    // === Schritt 3: Market Entry ===
-    const orderRes = await sendSignedRequest(
+    // === Step 4 – Market-Entry + TP/SL ===
+    const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2); // +2.72 %
+    const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2);     // –9 %
+
+    const order = await signedPOST(
       `${BASE_URL}/v5/order/create`,
       {
         category: "linear",
@@ -138,97 +117,72 @@ app.post("/", async (req, res) => {
         timeInForce: "GTC",
         takeProfit: tp,
         stopLoss: sl,
-        positionIdx: 0
+        positionIdx: 0,
+        reduceOnly: false,
       },
       API_KEY,
       API_SECRET
     );
 
-    console.log("Order Response:", JSON.stringify(orderRes, null, 2));
+    console.log("📤 Order Response:", JSON.stringify(order, null, 2));
 
     return res.json({
       ok: true,
-      message: `Opened ${side} ${symbol} @${price}`,
-      leverage,
+      message: `Opened ${side} ${symbol} @ ${price}`,
       qty,
-      accountTypeUsed,
-      bybitResponse: orderRes
+      leverage,
+      tp,
+      sl,
+      bybitResponse: order,
     });
   } catch (err) {
     console.error("Worker Error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: err.message,
-      stack: err.stack
-    });
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-/** === Helper: signierter POST-Request (Bybit) === */
-async function sendSignedRequest(url, params, apiKey, apiSecret) {
-  const timestamp = Date.now().toString();
-  const recvWindow = "5000";
-  const searchParams = new URLSearchParams(params).toString();
-  const preSign = timestamp + apiKey + recvWindow + searchParams;
-  const signature = crypto
-    .createHmac("sha256", apiSecret)
-    .update(preSign)
-    .digest("hex");
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-BAPI-API-KEY": apiKey,
-      "X-BAPI-TIMESTAMP": timestamp,
-      "X-BAPI-RECV-WINDOW": recvWindow,
-      "X-BAPI-SIGN": signature
-    },
-    body: searchParams
-  });
-
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    console.error("⚠️ Bybit non-JSON response for:", url);
-    console.error(text.slice(0, 400));
-    throw new Error(`Bybit returned non-JSON response (${res.status})`);
-  }
-}
-
-/** === Helper: signierter GET-Request (Bybit Balance) === */
-async function sendSignedGETRequest(url, params, apiKey, apiSecret) {
-  const timestamp = Date.now().toString();
-  const recvWindow = "5000";
-  const searchParams = new URLSearchParams(params).toString();
-  const preSign = timestamp + apiKey + recvWindow + searchParams;
-  const signature = crypto
-    .createHmac("sha256", apiSecret)
-    .update(preSign)
-    .digest("hex");
-
-  const fullUrl = `${url}?${searchParams}`;
-  const res = await fetch(fullUrl, {
+/* ===== Sign-Helper ===== */
+async function signedGET(url, params, apiKey, apiSecret) {
+  const ts = Date.now().toString();
+  const recv = "5000";
+  const q = new URLSearchParams(params).toString();
+  const pre = ts + apiKey + recv + q;
+  const sig = crypto.createHmac("sha256", apiSecret).update(pre).digest("hex");
+  const r = await fetch(`${url}?${q}`, {
     method: "GET",
     headers: {
       Accept: "application/json",
       "X-BAPI-API-KEY": apiKey,
-      "X-BAPI-TIMESTAMP": timestamp,
-      "X-BAPI-RECV-WINDOW": recvWindow,
-      "X-BAPI-SIGN": signature
-    }
+      "X-BAPI-TIMESTAMP": ts,
+      "X-BAPI-RECV-WINDOW": recv,
+      "X-BAPI-SIGN": sig,
+    },
   });
-
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    console.error("⚠️ Bybit non-JSON response for:", url);
-    console.error(text.slice(0, 400));
-    throw new Error(`Bybit returned non-JSON response (${res.status})`);
-  }
+  return await r.json();
 }
 
-app.listen(10000, () => console.log("✅ PeakAlgo Render bot online"));
+async function signedPOST(url, body, apiKey, apiSecret) {
+  const ts = Date.now().toString();
+  const recv = "5000";
+  const str = JSON.stringify(body);
+  const pre = ts + apiKey + recv + str;
+  const sig = crypto.createHmac("sha256", apiSecret).update(pre).digest("hex");
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-BAPI-API-KEY": apiKey,
+      "X-BAPI-TIMESTAMP": ts,
+      "X-BAPI-RECV-WINDOW": recv,
+      "X-BAPI-SIGN": sig,
+    },
+    body: str,
+  });
+  return await r.json();
+}
+
+/* ===== Server-Start ===== */
+app.listen(PORT, () =>
+  console.log(`✅ ETH-PeakAlgo Render-Bot listening on port ${PORT}`)
+);
