@@ -89,9 +89,14 @@ app.post("/", async (req, res) => {
     const positionValue = marginUsed * leverage;
     let qty = positionValue / price;
 
-    // ETH step size = 0.001
-    qty = Math.max(0.01, Math.min(qty, 100));
-qty = Math.floor(qty * 1000) / 1000;
+// Mindestgröße & Mindest-Nominalwert (10 USDT)
+qty = Math.max(0.01, Math.min(qty, 100));
+let nominal = qty * price;
+if (nominal < 10) {
+  qty = (10 / price);
+  qty = Math.ceil(qty * 1000) / 1000; // auf StepSize 0.001 runden
+}
+console.log(`🔢 Adjusted qty to ${qty} ETH (≈ ${qty * price} USDT nominal)`);
 
 
     console.log(
