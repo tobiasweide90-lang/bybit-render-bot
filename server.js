@@ -82,28 +82,29 @@ app.post("/", async (req, res) => {
     if (usdtBalance <= 0)
       throw new Error("No available USDT balance or invalid API response.");
 
-    //──────────────────────────────────────────────
-    // 2️⃣ Calculate position size (95% × 3x)
-    //──────────────────────────────────────────────
-    const marginUsed = usdtBalance * marginFraction;
-    const positionValue = marginUsed * leverage;
-    let qty = positionValue / price;
+//──────────────────────────────────────────────
+// 2️⃣ Calculate position size (95% × 3x)
+//──────────────────────────────────────────────
+const marginUsed = usdtBalance * marginFraction;
+const positionValue = marginUsed * leverage;
+let qty = positionValue / price;
 
 // Mindestgröße & Mindest-Nominalwert (10 USDT)
 qty = Math.max(0.01, Math.min(qty, 100));
 let nominal = qty * price;
 if (nominal < 10) {
-  qty = (10 / price);
-  qty = Math.ceil(qty * 1000) / 1000; // auf StepSize 0.001 runden
+  qty = 10 / price;
 }
-console.log(`🔢 Adjusted qty to ${qty} ETH (≈ ${qty * price} USDT nominal)`);
 
+// 🔧 ETHUSDT: StepSize = 0.01 → sauber runden
+qty = Math.floor(qty * 100) / 100;
 
-    console.log(
-      `💰 Calculated qty: ${qty} ETH (Margin: ${marginUsed.toFixed(
-        2
-      )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
-    );
+console.log(`🔢 Adjusted qty to ${qty} ETH (≈ ${(qty * price).toFixed(2)} USDT nominal)`);
+
+console.log(
+  `💰 Calculated qty: ${qty} ETH (Margin: ${marginUsed.toFixed(2)} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
+);
+
 
     //──────────────────────────────────────────────
     // 3️⃣ Set leverage (optional)
