@@ -160,7 +160,7 @@ app.post("/", async (req, res) => {
 	  takeProfit: tp,
 	  stopLoss: sl,
 	  reduceOnly: false,
-	  positionIdx: 0, // ✅ fixes One-Way Mode mismatch
+	  positionIdx: 0, // ✅ enforce One-Way
 	};
 
 	console.log("🟩 Order Payload (forced One-Way):", orderPayload);
@@ -183,55 +183,16 @@ app.post("/", async (req, res) => {
 	  sl,
 	  bybitResponse: orderRes,
 	});
+	  } catch (err) {
+		console.error("Worker Error:", err);
+		return res.status(500).json({ ok: false, error: err.message });
+	  }
+	});
 
+	//──────────────────────────────────────────────
+	// ======= Start Server =======
+	//──────────────────────────────────────────────
+	app.listen(PORT, () =>
+	  console.log(`✅ ETH-PeakAlgo Render-Bot listening on port ${PORT}`)
+	);
 
-/* ======= Sign helpers ======= */
-
-async function sendSignedGETRequest(url, params, apiKey, apiSecret) {
-  const timestamp = Date.now().toString();
-  const recvWindow = "5000";
-  const query = new URLSearchParams(params).toString();
-  const preSign = timestamp + apiKey + recvWindow + query;
-  const sign = crypto.createHmac("sha256", apiSecret).update(preSign).digest("hex");
-
-  const res = await fetch(`${url}?${query}`, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      "X-BAPI-API-KEY": apiKey,
-      "X-BAPI-TIMESTAMP": timestamp,
-      "X-BAPI-RECV-WINDOW": recvWindow,
-      "X-BAPI-SIGN": sign,
-    },
-  });
-  const text = await res.text();
-  return JSON.parse(text);
-}
-
-async function sendSignedPOST(url, body, apiKey, apiSecret) {
-  const timestamp = Date.now().toString();
-  const recvWindow = "5000";
-  const bodyStr = JSON.stringify(body);
-  const preSign = timestamp + apiKey + recvWindow + bodyStr;
-  const sign = crypto.createHmac("sha256", apiSecret).update(preSign).digest("hex");
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "X-BAPI-API-KEY": apiKey,
-      "X-BAPI-TIMESTAMP": timestamp,
-      "X-BAPI-RECV-WINDOW": recvWindow,
-      "X-BAPI-SIGN": sign,
-    },
-    body: bodyStr,
-  });
-  const text = await res.text();
-  return JSON.parse(text);
-}
-
-/* ======= Start Server ======= */
-app.listen(PORT, () =>
-  console.log(`✅ ETH-PeakAlgo Render-Bot listening on port ${PORT}`)
-);
