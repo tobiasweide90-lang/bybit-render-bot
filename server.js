@@ -1,7 +1,7 @@
 /**
- * ETH-PeakAlgo Render Bot – TradingView → Bybit
- * Market Entry + Fixed TP/SL + 95% sizing + 3x leverage
- * Auto-symbol cleanup (.P → '') for TradingView symbols
+ * ETHUSDT Render Bot – TradingView → Bybit (REAL)
+ * Market Entry + TP/SL + dynamic 95% sizing + leverage
+ * Handles .P symbols, One-Way/Hedge detection, and 0.01 ETH step rounding
  */
 
 import express from "express";
@@ -13,9 +13,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-//──────────────────────────────────────────────
-// Main route: TradingView → Bybit
-//──────────────────────────────────────────────
 app.post("/", async (req, res) => {
   try {
     const data = req.body;
@@ -23,13 +20,11 @@ app.post("/", async (req, res) => {
     if (data.secret !== SECRET)
       return res.status(403).json({ ok: false, error: "Unauthorized" });
 
-    let { event, symbol, price, lvg } = data;
+    const { event, symbol, price, lvg } = data;
     if (!event || !symbol || !price)
       return res.status(400).json({ ok: false, error: "Missing fields" });
 
-    // Auto-clean TradingView symbols (remove ".P" or "PERP")
-    const cleanSymbol = symbol.replace(".P", "").replace("PERP", "").toUpperCase();
-
+    // Determine trade side
     const side = event.includes("LONG")
       ? "Buy"
       : event.includes("SHORT")
@@ -37,6 +32,9 @@ app.post("/", async (req, res) => {
       : null;
     if (!side)
       return res.status(400).json({ ok: false, error: "Invalid event" });
+
+    // Clean up symbol (TradingView often sends .P)
+    const cleanSymbol = symbol.replace(".P", "").trim();
 
     const API_KEY = process.env.BYBIT_API_KEY;
     const API_SECRET = process.env.BYBIT_API_SECRET;
@@ -46,16 +44,24 @@ app.post("/", async (req, res) => {
       .replace(/\/+$/, "");
 
     const ACCOUNT_TYPE = process.env.ACCOUNT_TYPE || "UNIFIED";
-    const marginFraction = 0.95; // use 95% of wallet balance
+    const marginFraction = 0.95;
     const leverage = Number(lvg) || 3;
 
     console.log("///////////////////////////////////////////////////////////");
     console.log("=== ETH-BOT ORDER START ===");
-    console.log({ event, side, symbol, cleanSymbol, price, leverage, marginFraction });
+    console.log({
+      event,
+      side,
+      symbol,
+      cleanSymbol,
+      price,
+      leverage,
+      marginFraction,
+    });
     console.log("===========================");
 
     //──────────────────────────────────────────────
-    // 1️⃣ Wallet balance (Unified account)
+    // 1️⃣ Fetch USDT balance
     //──────────────────────────────────────────────
     const balanceRes = await sendSignedGETRequest(
       `${BASE_URL}/v5/account/wallet-balance`,
@@ -76,38 +82,42 @@ app.post("/", async (req, res) => {
       0;
 
     console.log(
-      `💰 Wallet balance detected: ${usdtBalance.toFixed(4)} USDT (accountType=${ACCOUNT_TYPE})`
+      `💰 Wallet balance detected: ${usdtBalance.toFixed(
+        4
+      )} USDT (accountType=${ACCOUNT_TYPE})`
     );
 
     if (usdtBalance <= 0)
       throw new Error("No available USDT balance or invalid API response.");
 
-//──────────────────────────────────────────────
-// 2️⃣ Calculate position size (95% × 3x)
-//──────────────────────────────────────────────
-const marginUsed = usdtBalance * marginFraction;
-const positionValue = marginUsed * leverage;
-let qty = positionValue / price;
+    //──────────────────────────────────────────────
+    // 2️⃣ Calculate position size (95% × leverage)
+    //──────────────────────────────────────────────
+    const marginUsed = usdtBalance * marginFraction;
+    const positionValue = marginUsed * leverage;
+    let qty = positionValue / price;
 
-// Mindestgröße & Mindest-Nominalwert (10 USDT)
-qty = Math.max(0.01, Math.min(qty, 100));
-let nominal = qty * price;
-if (nominal < 10) {
-  qty = 10 / price;
-}
+    // Mindestgröße & Mindest-Nominalwert (10 USDT)
+    qty = Math.max(0.01, Math.min(qty, 100));
+    let nominal = qty * price;
+    if (nominal < 10) {
+      qty = 10 / price;
+    }
 
-// 🔧 ETHUSDT: StepSize = 0.01 → sauber runden
-qty = Math.floor(qty * 100) / 100;
+    // 🔧 ETH StepSize = 0.01 → korrekt runden
+    qty = Math.floor(qty * 100) / 100;
 
-console.log(`🔢 Adjusted qty to ${qty} ETH (≈ ${(qty * price).toFixed(2)} USDT nominal)`);
-
-console.log(
-  `💰 Calculated qty: ${qty} ETH (Margin: ${marginUsed.toFixed(2)} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
-);
-
+    console.log(
+      `🔢 Adjusted qty to ${qty} ETH (≈ ${(qty * price).toFixed(2)} USDT nominal)`
+    );
+    console.log(
+      `💰 Calculated qty: ${qty} ETH (Margin: ${marginUsed.toFixed(
+        2
+      )} USDT × ${leverage}x = ${positionValue.toFixed(2)} USDT total)`
+    );
 
     //──────────────────────────────────────────────
-    // 3️⃣ Set leverage (optional)
+    // 3️⃣ Set leverage
     //──────────────────────────────────────────────
     try {
       const levRes = await sendSignedPOST(
@@ -127,20 +137,36 @@ console.log(
     }
 
     //──────────────────────────────────────────────
-    // 4️⃣ Place Market Order + TP/SL (fixed %)
+    // 3.5️⃣ Detect position mode (One-Way vs Hedge)
     //──────────────────────────────────────────────
-    const TP_PCT = 2.72;
-    const SL_PCT = 9.0;
+    let positionIdx = 0;
+    try {
+      const modeRes = await sendSignedGETRequest(
+        `${BASE_URL}/v5/position/switch-mode`,
+        { category: "linear" },
+        API_KEY,
+        API_SECRET
+      );
 
-    const tp = (side === "Buy"
-      ? price * (1 + TP_PCT / 100)
-      : price * (1 - TP_PCT / 100)
-    ).toFixed(2);
+      const mode = modeRes.result?.[0]?.positionMode || "MergedSingle";
+      const isHedge = mode.toLowerCase().includes("hedge");
 
-    const sl = (side === "Buy"
-      ? price * (1 - SL_PCT / 100)
-      : price * (1 + SL_PCT / 100)
-    ).toFixed(2);
+      positionIdx = isHedge
+        ? side === "Buy"
+          ? 1
+          : 2
+        : 0;
+
+      console.log(`⚙️ Position mode detected: ${mode} → positionIdx=${positionIdx}`);
+    } catch (err) {
+      console.warn("⚠️ Could not fetch position mode, using default positionIdx=0");
+    }
+
+    //──────────────────────────────────────────────
+    // 4️⃣ Place Market Order + TP/SL
+    //──────────────────────────────────────────────
+    const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
+    const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2);
 
     const orderRes = await sendSignedPOST(
       `${BASE_URL}/v5/order/create`,
@@ -153,8 +179,8 @@ console.log(
         timeInForce: "GTC",
         takeProfit: tp,
         stopLoss: sl,
-        positionIdx: 0,
         reduceOnly: false,
+        positionIdx,
       },
       API_KEY,
       API_SECRET
@@ -172,14 +198,13 @@ console.log(
       bybitResponse: orderRes,
     });
   } catch (err) {
-    console.error("❌ Worker Error:", err);
+    console.error("Worker Error:", err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-//──────────────────────────────────────────────
-// Helper functions for signed API calls
-//──────────────────────────────────────────────
+/* ======= Sign helpers ======= */
+
 async function sendSignedGETRequest(url, params, apiKey, apiSecret) {
   const timestamp = Date.now().toString();
   const recvWindow = "5000";
@@ -224,9 +249,7 @@ async function sendSignedPOST(url, body, apiKey, apiSecret) {
   return JSON.parse(text);
 }
 
-//──────────────────────────────────────────────
-// Start server
-//──────────────────────────────────────────────
+/* ======= Start Server ======= */
 app.listen(PORT, () =>
   console.log(`✅ ETH-PeakAlgo Render-Bot listening on port ${PORT}`)
 );
