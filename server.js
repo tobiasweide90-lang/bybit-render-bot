@@ -136,31 +136,12 @@ app.post("/", async (req, res) => {
       console.warn("⚠️ set-leverage failed:", err.message);
     }
 
-    //──────────────────────────────────────────────
-    // 3.5️⃣ Detect position mode (One-Way vs Hedge)
-    //──────────────────────────────────────────────
-    let positionIdx = 0;
-    try {
-      const modeRes = await sendSignedGETRequest(
-        `${BASE_URL}/v5/position/switch-mode`,
-        { category: "linear" },
-        API_KEY,
-        API_SECRET
-      );
+	//──────────────────────────────────────────────
+	// 3.5️⃣ Detect position mode (force One-Way)
+	//──────────────────────────────────────────────
+	let positionIdx = 0;
+	console.log("⚙️ Using fixed One-Way mode (positionIdx=0)");
 
-      const mode = modeRes.result?.[0]?.positionMode || "MergedSingle";
-      const isHedge = mode.toLowerCase().includes("hedge");
-
-      positionIdx = isHedge
-        ? side === "Buy"
-          ? 1
-          : 2
-        : 0;
-
-      console.log(`⚙️ Position mode detected: ${mode} → positionIdx=${positionIdx}`);
-    } catch (err) {
-      console.warn("⚠️ Could not fetch position mode, using default positionIdx=0");
-    }
 
     //──────────────────────────────────────────────
     // 4️⃣ Place Market Order + TP/SL
@@ -168,23 +149,24 @@ app.post("/", async (req, res) => {
     const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
     const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2);
 
-    const orderRes = await sendSignedPOST(
-      `${BASE_URL}/v5/order/create`,
-      {
-        category: "linear",
-        symbol: cleanSymbol,
-        side,
-        orderType: "Market",
-        qty: qty.toString(),
-        timeInForce: "GTC",
-        takeProfit: tp,
-        stopLoss: sl,
-        reduceOnly: false,
-        positionIdx,
-      },
-      API_KEY,
-      API_SECRET
-    );
+	const orderRes = await sendSignedPOST(
+	  `${BASE_URL}/v5/order/create`,
+	  {
+		category: "linear",
+		symbol: cleanSymbol,
+		side,
+		orderType: "Market",
+		qty: qty.toString(),
+		timeInForce: "GTC",
+		takeProfit: tp,
+		stopLoss: sl,
+		reduceOnly: false,
+		positionIdx, // bleibt = 0
+	  },
+	  API_KEY,
+	  API_SECRET
+	);
+
 
     console.log("📤 Order Response:", JSON.stringify(orderRes, null, 2));
 
