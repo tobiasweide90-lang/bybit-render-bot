@@ -141,6 +141,22 @@ app.post("/", async (req, res) => {
       console.warn("⚠️ set-leverage failed:", err.message);
     }
 
+//──────────────────────────────────────────────
+// 3.8️⃣ Force One-Way Mode (avoid Bybit mismatch)
+//──────────────────────────────────────────────
+try {
+  const modeRes = await sendSignedPOST(
+    `${BASE_URL}/v5/position/switch-mode`,
+    { category: "linear", mode: 0 }, // 0 = One-Way
+    API_KEY,
+    API_SECRET
+  );
+  console.log("🔧 Switch-Mode response:", modeRes.retMsg);
+} catch (err) {
+  console.warn("⚠️ Could not enforce One-Way mode:", err.message);
+}
+
+
     //──────────────────────────────────────────────
     // 4️⃣ Place Market Order + TP/SL (force One-Way)
     //──────────────────────────────────────────────
