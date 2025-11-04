@@ -24,7 +24,9 @@ app.post("/", async (req, res) => {
     if (!event || !symbol || !price)
       return res.status(400).json({ ok: false, error: "Missing fields" });
 
+    //──────────────────────────────────────────────
     // Determine trade side
+    //──────────────────────────────────────────────
     const side = event.includes("LONG")
       ? "Buy"
       : event.includes("SHORT")
@@ -36,6 +38,9 @@ app.post("/", async (req, res) => {
     // Clean up symbol (TradingView often sends .P)
     const cleanSymbol = symbol.replace(".P", "").trim();
 
+    //──────────────────────────────────────────────
+    // Base setup
+    //──────────────────────────────────────────────
     const API_KEY = process.env.BYBIT_API_KEY;
     const API_SECRET = process.env.BYBIT_API_SECRET;
     const BASE_URL = (process.env.BYBIT_API_URL || "https://api.bybit.com")
@@ -91,7 +96,7 @@ app.post("/", async (req, res) => {
       throw new Error("No available USDT balance or invalid API response.");
 
     //──────────────────────────────────────────────
-    // 2️⃣ Calculate position size (95% × leverage)
+    // 2️⃣ Calculate position size (95 % × leverage)
     //──────────────────────────────────────────────
     const marginUsed = usdtBalance * marginFraction;
     const positionValue = marginUsed * leverage;
@@ -104,11 +109,11 @@ app.post("/", async (req, res) => {
       qty = 10 / price;
     }
 
-    // 🔧 ETH StepSize = 0.01 → korrekt runden
+    // 🔧 ETH StepSize = 0.01 → runden
     qty = Math.floor(qty * 100) / 100;
 
     console.log(
-      `🔢 Adjusted qty to ${qty} ETH (≈ ${(qty * price).toFixed(2)} USDT nominal)`
+      `🔢 Adjusted qty = ${qty} ETH (≈ ${(qty * price).toFixed(2)} USDT nominal)`
     );
     console.log(
       `💰 Calculated qty: ${qty} ETH (Margin: ${marginUsed.toFixed(
@@ -136,63 +141,102 @@ app.post("/", async (req, res) => {
       console.warn("⚠️ set-leverage failed:", err.message);
     }
 
-	//──────────────────────────────────────────────
-	// 3.5️⃣ Detect position mode (force One-Way)
-	//──────────────────────────────────────────────
-	let positionIdx = 0;
-	console.log("⚙️ Using fixed One-Way mode (positionIdx=0)");
+    //──────────────────────────────────────────────
+    // 4️⃣ Place Market Order + TP/SL (force One-Way)
+    //──────────────────────────────────────────────
+    const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
+    const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2);
 
+    const orderPayload = {
+      category: "linear",
+      symbol: cleanSymbol,
+      side,
+      orderType: "Market",
+      qty: qty.toString(),
+      timeInForce: "GTC",
+      takeProfit: tp,
+      stopLoss: sl,
+      reduceOnly: false,
+      positionIdx: 0, // ✅ enforce One-Way
+    };
 
-	//──────────────────────────────────────────────
-	// 4️⃣ Place Market Order + TP/SL (One-Way mode enforced)
-	//──────────────────────────────────────────────
-	const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
-	const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2);
+    console.log("🟩 Order Payload (forced One-Way):", orderPayload);
 
-	// --- Bybit One-Way Mode: force positionIdx = 0
-	const orderPayload = {
-	  category: "linear",
-	  symbol: cleanSymbol,
-	  side,
-	  orderType: "Market",
-	  qty: qty.toString(),
-	  timeInForce: "GTC",
-	  takeProfit: tp,
-	  stopLoss: sl,
-	  reduceOnly: false,
-	  positionIdx: 0, // ✅ enforce One-Way
-	};
+    const orderRes = await sendSignedPOST(
+      `${BASE_URL}/v5/order/create`,
+      orderPayload,
+      API_KEY,
+      API_SECRET
+    );
 
-	console.log("🟩 Order Payload (forced One-Way):", orderPayload);
+    console.log("📤 Order Response:", JSON.stringify(orderRes, null, 2));
 
-	const orderRes = await sendSignedPOST(
-	  `${BASE_URL}/v5/order/create`,
-	  orderPayload,
-	  API_KEY,
-	  API_SECRET
-	);
+    return res.json({
+      ok: true,
+      message: `Opened ${side} ${cleanSymbol} @ ${price}`,
+      qty,
+      leverage,
+      tp,
+      sl,
+      bybitResponse: orderRes,
+    });
+  } catch (err) {
+    console.error("Worker Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
-	console.log("📤 Order Response:", JSON.stringify(orderRes, null, 2));
+//──────────────────────────────────────────────
+// ======= Sign helpers =======
+//──────────────────────────────────────────────
 
-	return res.json({
-	  ok: true,
-	  message: `Opened ${side} ${cleanSymbol} @ ${price}`,
-	  qty,
-	  leverage,
-	  tp,
-	  sl,
-	  bybitResponse: orderRes,
-	});
-	  } catch (err) {
-		console.error("Worker Error:", err);
-		return res.status(500).json({ ok: false, error: err.message });
-	  }
-	});
+async function sendSignedGETRequest(url, params, apiKey, apiSecret) {
+  const timestamp = Date.now().toString();
+  const recvWindow = "5000";
+  const query = new URLSearchParams(params).toString();
+  const preSign = timestamp + apiKey + recvWindow + query;
+  const sign = crypto.createHmac("sha256", apiSecret).update(preSign).digest("hex");
 
-	//──────────────────────────────────────────────
-	// ======= Start Server =======
-	//──────────────────────────────────────────────
-	app.listen(PORT, () =>
-	  console.log(`✅ ETH-PeakAlgo Render-Bot listening on port ${PORT}`)
-	);
+  const res = await fetch(`${url}?${query}`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "X-BAPI-API-KEY": apiKey,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": recvWindow,
+      "X-BAPI-SIGN": sign,
+    },
+  });
+  const text = await res.text();
+  return JSON.parse(text);
+}
 
+async function sendSignedPOST(url, body, apiKey, apiSecret) {
+  const timestamp = Date.now().toString();
+  const recvWindow = "5000";
+  const bodyStr = JSON.stringify(body);
+  const preSign = timestamp + apiKey + recvWindow + bodyStr;
+  const sign = crypto.createHmac("sha256", apiSecret).update(preSign).digest("hex");
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-BAPI-API-KEY": apiKey,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": recvWindow,
+      "X-BAPI-SIGN": sign,
+    },
+    body: bodyStr,
+  });
+  const text = await res.text();
+  return JSON.parse(text);
+}
+
+//──────────────────────────────────────────────
+// ======= Start Server =======
+//──────────────────────────────────────────────
+app.listen(PORT, () =>
+  console.log(`✅ ETH-PeakAlgo Render-Bot listening on port ${PORT}`)
+);
