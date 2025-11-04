@@ -90,8 +90,9 @@ app.post("/", async (req, res) => {
     let qty = positionValue / price;
 
     // ETH step size = 0.001
-    qty = Math.max(0.001, Math.min(qty, 100));
-    qty = Math.floor(qty * 1000) / 1000;
+    qty = Math.max(0.01, Math.min(qty, 100));
+qty = Math.floor(qty * 1000) / 1000;
+
 
     console.log(
       `💰 Calculated qty: ${qty} ETH (Margin: ${marginUsed.toFixed(
