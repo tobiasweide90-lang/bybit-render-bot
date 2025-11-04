@@ -160,24 +160,32 @@ app.post("/", async (req, res) => {
 	  console.warn("⚠️ Could not enforce One-Way mode:", err.message);
 	}
 
-    //──────────────────────────────────────────────
-    // 4️⃣ Place Market Order + TP/SL (force One-Way)
-    //──────────────────────────────────────────────
-    const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
-    const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2);
+//──────────────────────────────────────────────
+// 4️⃣ Place Market Order + TP/SL (One-Way mode enforced)
+//──────────────────────────────────────────────
+// TP: ca. +2.72% / SL: -9.00% (Notfall-Stop)
+const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
+const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2); // ← alter Wert
 
-    const orderPayload = {
-      category: "linear",
-      symbol: cleanSymbol,
-      side,
-      orderType: "Market",
-      qty: qty.toString(),
-      timeInForce: "GTC",
-      takeProfit: tp,
-      stopLoss: sl,
-      reduceOnly: false,
-      positionIdx: 0, // ✅ enforce One-Way
-    };
+// 🔧 Neuer fester SL = 9 %
+const slPct = 0.09;
+const slNew = (side === "Buy" ? price * (1 - slPct) : price * (1 + slPct)).toFixed(2);
+
+console.log(`🛡️ Safety SL fixed at ${slPct * 100}% → ${slNew}`);
+
+const orderPayload = {
+  category: "linear",
+  symbol: cleanSymbol,
+  side,
+  orderType: "Market",
+  qty: qty.toString(),
+  timeInForce: "GTC",
+  takeProfit: tp,
+  stopLoss: slNew,        // ✅ 9% Notfall-SL hier gesetzt
+  reduceOnly: false,
+  positionIdx: 0,
+};
+
 
     console.log("🟩 Order Payload (forced One-Way):", orderPayload);
 
