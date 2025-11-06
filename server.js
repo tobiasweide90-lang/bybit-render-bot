@@ -165,7 +165,7 @@ app.post("/", async (req, res) => {
 //──────────────────────────────────────────────
 // TP: ca. +2.72% / SL: -9.00% (Notfall-Stop)
 const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
-const sl = (side === "Buy" ? price * 0.91 : price * 1.09).toFixed(2); // ← alter Wert
+const sl = (side === "Buy" ? price * 0.77 : price * 1.23).toFixed(2);
 
 // 🔧 Neuer fester SL = 9 %
 const slPct = 0.09;
