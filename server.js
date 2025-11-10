@@ -159,6 +159,73 @@ app.post("/", async (req, res) => {
 	} catch (err) {
 	  console.warn("⚠️ Could not enforce One-Way mode:", err.message);
 	}
+//──────────────────────────────────────────────
+// 3.9️⃣ Cleanup before placing new order (Flip logic)
+//──────────────────────────────────────────────
+console.log("🧹 Checking for opposite positions / open orders...");
+
+try {
+  // === Position prüfen ===
+  const posRes = await sendSignedGETRequest(
+    `${BASE_URL}/v5/position/list`,
+    { category: "linear", symbol: cleanSymbol },
+    API_KEY,
+    API_SECRET
+  );
+
+  const pos = posRes.result?.list?.[0];
+  if (pos && Number(pos.size) > 0) {
+    const currentSide = pos.side; // "Buy" oder "Sell"
+    if (
+      (side === "Buy" && currentSide === "Sell") ||
+      (side === "Sell" && currentSide === "Buy")
+    ) {
+      console.log(`🧹 Closing opposite position (${currentSide}) before flipping...`);
+
+      await sendSignedPOST(
+        `${BASE_URL}/v5/order/create`,
+        {
+          category: "linear",
+          symbol: cleanSymbol,
+          side: currentSide === "Buy" ? "Sell" : "Buy",
+          orderType: "Market",
+          qty: pos.size,
+          reduceOnly: true,
+          timeInForce: "IOC",
+        },
+        API_KEY,
+        API_SECRET
+      );
+      console.log("✅ Opposite position closed.");
+    }
+  }
+
+  // === Offene Orders löschen (alte TP/SL) ===
+  const openOrders = await sendSignedGETRequest(
+    `${BASE_URL}/v5/order/realtime`,
+    { category: "linear", symbol: cleanSymbol },
+    API_KEY,
+    API_SECRET
+  );
+
+  if (openOrders.result?.list?.length) {
+    for (const o of openOrders.result.list) {
+      await sendSignedPOST(
+        `${BASE_URL}/v5/order/cancel`,
+        {
+          category: "linear",
+          symbol: cleanSymbol,
+          orderId: o.orderId,
+        },
+        API_KEY,
+        API_SECRET
+      );
+    }
+    console.log(`🧹 ${openOrders.result.list.length} old orders cancelled.`);
+  }
+} catch (err) {
+  console.warn("⚠️ Cleanup step failed:", err.message);
+}
 
 //──────────────────────────────────────────────
 // 4️⃣ Place Market Order + TP/SL (One-Way mode enforced)
