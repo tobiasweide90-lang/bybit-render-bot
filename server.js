@@ -141,143 +141,124 @@ app.post("/", async (req, res) => {
       console.warn("⚠️ set-leverage failed:", err.message);
     }
 
-	//──────────────────────────────────────────────
-	// 3.8️⃣ Force One-Way Mode for the specific symbol
-	//──────────────────────────────────────────────
-	try {
-	  const modeRes = await sendSignedPOST(
-		`${BASE_URL}/v5/position/switch-mode`,
-		{ 
-		  category: "linear", 
-		  symbol: cleanSymbol,   // 🔧 fix: Symbol spezifizieren!
-		  mode: 0                // 0 = One-Way
-		},
-		API_KEY,
-		API_SECRET
-	  );
-	  console.log("🔧 Switch-Mode response:", modeRes.retMsg);
-	} catch (err) {
-	  console.warn("⚠️ Could not enforce One-Way mode:", err.message);
-	}
-//──────────────────────────────────────────────
-// 3.9️⃣ Cleanup before placing new order (Flip logic)
-//──────────────────────────────────────────────
-console.log("🧹 Checking for opposite positions / open orders...");
-
-try {
-  // === Position prüfen ===
-  const posRes = await sendSignedGETRequest(
-    `${BASE_URL}/v5/position/list`,
-    { category: "linear", symbol: cleanSymbol },
-    API_KEY,
-    API_SECRET
-  );
-
-  const pos = posRes.result?.list?.[0];
-  if (pos && Number(pos.size) > 0) {
-    const currentSide = pos.side; // "Buy" oder "Sell"
-    if (
-      (side === "Buy" && currentSide === "Sell") ||
-      (side === "Sell" && currentSide === "Buy")
-    ) {
-      console.log(`🧹 Closing opposite position (${currentSide}) before flipping...`);
-
-      await sendSignedPOST(
-        `${BASE_URL}/v5/order/create`,
-        {
-          category: "linear",
+    //──────────────────────────────────────────────
+    // 3.8️⃣ Force One-Way Mode for the specific symbol
+    //──────────────────────────────────────────────
+    try {
+      const modeRes = await sendSignedPOST(
+        `${BASE_URL}/v5/position/switch-mode`,
+        { 
+          category: "linear", 
           symbol: cleanSymbol,
-          side: currentSide === "Buy" ? "Sell" : "Buy",
-          orderType: "Market",
-          qty: pos.size,
-          reduceOnly: true,
-          timeInForce: "IOC",
+          mode: 0                // 0 = One-Way
         },
         API_KEY,
         API_SECRET
       );
-      console.log("✅ Opposite position closed.");
+      console.log("🔧 Switch-Mode response:", modeRes.retMsg);
+    } catch (err) {
+      console.warn("⚠️ Could not enforce One-Way mode:", err.message);
     }
-  }
 
-  // === Offene Orders löschen (alte TP/SL) ===
-  const openOrders = await sendSignedGETRequest(
-    `${BASE_URL}/v5/order/realtime`,
-    { category: "linear", symbol: cleanSymbol },
-    API_KEY,
-    API_SECRET
-  );
+    //──────────────────────────────────────────────
+    // 3.9️⃣ Cleanup before placing new order (Flip logic)
+    //──────────────────────────────────────────────
+    console.log("🧹 Checking for opposite positions / open orders...");
 
-  if (openOrders.result?.list?.length) {
-    for (const o of openOrders.result.list) {
-      await sendSignedPOST(
-        `${BASE_URL}/v5/order/cancel`,
-        {
-          category: "linear",
-          symbol: cleanSymbol,
-          orderId: o.orderId,
-        },
+    try {
+      // === Position prüfen ===
+      const posRes = await sendSignedGETRequest(
+        `${BASE_URL}/v5/position/list`,
+        { category: "linear", symbol: cleanSymbol },
         API_KEY,
         API_SECRET
       );
+
+      const pos = posRes.result?.list?.[0];
+      if (pos && Number(pos.size) > 0) {
+        const currentSide = pos.side; // "Buy" oder "Sell"
+        if (
+          (side === "Buy" && currentSide === "Sell") ||
+          (side === "Sell" && currentSide === "Buy")
+        ) {
+          console.log(`🧹 Closing opposite position (${currentSide}) before flipping...`);
+
+          await sendSignedPOST(
+            `${BASE_URL}/v5/order/create`,
+            {
+              category: "linear",
+              symbol: cleanSymbol,
+              side: currentSide === "Buy" ? "Sell" : "Buy",
+              orderType: "Market",
+              qty: pos.size,
+              reduceOnly: true,
+              timeInForce: "IOC",
+            },
+            API_KEY,
+            API_SECRET
+          );
+          console.log("✅ Opposite position closed.");
+        }
+      }
+
+      // === Offene Orders löschen (alte TP/SL) ===
+      const openOrders = await sendSignedGETRequest(
+        `${BASE_URL}/v5/order/realtime`,
+        { category: "linear", symbol: cleanSymbol },
+        API_KEY,
+        API_SECRET
+      );
+
+      if (openOrders.result?.list?.length) {
+        for (const o of openOrders.result.list) {
+          await sendSignedPOST(
+            `${BASE_URL}/v5/order/cancel`,
+            {
+              category: "linear",
+              symbol: cleanSymbol,
+              orderId: o.orderId,
+            },
+            API_KEY,
+            API_SECRET
+          );
+        }
+        console.log(`🧹 ${openOrders.result.list.length} old orders cancelled.`);
+      }
+    } catch (err) {
+      console.warn("⚠️ Cleanup step failed:", err.message);
     }
-    console.log(`🧹 ${openOrders.result.list.length} old orders cancelled.`);
-  }
-} catch (err) {
-  console.warn("⚠️ Cleanup step failed:", err.message);
-}
 
-//──────────────────────────────────────────────
-// 4️⃣ Place Market Order + TP/SL (One-Way mode enforced)
-//──────────────────────────────────────────────
-// TP: ca. +2.72% / SL: -21.00% (Notfall-Stop)
-const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
+    //──────────────────────────────────────────────
+    // 4️⃣ Place Market Order + TP/SL (One-Way mode enforced)
+    //──────────────────────────────────────────────
 
-// Fester Notfall-SL = 21 %
-const slPct = 0.21;
-const sl = (
-  side === "Buy"
-    ? price * (1 - slPct) // 21 % unter Entry
-    : price * (1 + slPct) // 21 % über Entry
-).toFixed(2);
+    // TP: +2.72 %
+    const tp = (
+      side === "Buy" ? price * 1.0272 : price * 0.9728
+    ).toFixed(2);
 
-console.log(`🛡️ Safety SL fixed at ${slPct * 100}% → ${sl}`);
+    // Fester Notfall-SL = 21 %
+    const slPct = 0.21;
+    const sl = (
+      side === "Buy"
+        ? price * (1 - slPct)   // 21 % unter Entry
+        : price * (1 + slPct)   // 21 % über Entry
+    ).toFixed(2);
 
-const orderPayload = {
-  category: "linear",
-  symbol: cleanSymbol,
-  side,
-  orderType: "Market",
-  qty: qty.toString(),
-  timeInForce: "GTC",
-  takeProfit: tp,
-  stopLoss: sl,      // ✅ jetzt 21 % Notfall-SL
-  reduceOnly: false,
-  positionIdx: 0,
-};
+    console.log(`🛡️ Safety SL fixed at ${slPct * 100}% → ${sl}`);
 
-console.log("🟩 Order Payload (forced One-Way):", orderPayload);
-
-const orderRes = await sendSignedPOST(
-  `${BASE_URL}/v5/order/create`,
-  orderPayload,
-  API_KEY,
-  API_SECRET
-);
-
-console.log("📤 Order Response:", JSON.stringify(orderRes, null, 2));
-
-return res.json({
-  ok: true,
-  message: `Opened ${side} ${cleanSymbol} @ ${price}`,
-  qty,
-  leverage,
-  tp,
-  sl,              // 🔁 Response zeigt nun den tatsächlichen 21%-SL
-  bybitResponse: orderRes,
-});
-
-
+    const orderPayload = {
+      category: "linear",
+      symbol: cleanSymbol,
+      side,
+      orderType: "Market",
+      qty: qty.toString(),
+      timeInForce: "GTC",
+      takeProfit: tp,
+      stopLoss: sl,        // ✅ 21% Notfall-SL hier gesetzt
+      reduceOnly: false,
+      positionIdx: 0,
+    };
 
     console.log("🟩 Order Payload (forced One-Way):", orderPayload);
 
