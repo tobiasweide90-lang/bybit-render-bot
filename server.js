@@ -230,15 +230,18 @@ try {
 //──────────────────────────────────────────────
 // 4️⃣ Place Market Order + TP/SL (One-Way mode enforced)
 //──────────────────────────────────────────────
-// TP: ca. +2.72% / SL: -9.00% (Notfall-Stop)
+// TP: ca. +2.72% / SL: -21.00% (Notfall-Stop)
 const tp = (side === "Buy" ? price * 1.0272 : price * 0.9728).toFixed(2);
-const sl = (side === "Buy" ? price * 0.77 : price * 1.23).toFixed(2);
 
-// 🔧 Neuer fester SL = 9 %
-const slPct = 0.09;
-const slNew = (side === "Buy" ? price * (1 - slPct) : price * (1 + slPct)).toFixed(2);
+// Fester Notfall-SL = 21 %
+const slPct = 0.21;
+const sl = (
+  side === "Buy"
+    ? price * (1 - slPct) // 21 % unter Entry
+    : price * (1 + slPct) // 21 % über Entry
+).toFixed(2);
 
-console.log(`🛡️ Safety SL fixed at ${slPct * 100}% → ${slNew}`);
+console.log(`🛡️ Safety SL fixed at ${slPct * 100}% → ${sl}`);
 
 const orderPayload = {
   category: "linear",
@@ -248,10 +251,32 @@ const orderPayload = {
   qty: qty.toString(),
   timeInForce: "GTC",
   takeProfit: tp,
-  stopLoss: slNew,        // ✅ 9% Notfall-SL hier gesetzt
+  stopLoss: sl,      // ✅ jetzt 21 % Notfall-SL
   reduceOnly: false,
   positionIdx: 0,
 };
+
+console.log("🟩 Order Payload (forced One-Way):", orderPayload);
+
+const orderRes = await sendSignedPOST(
+  `${BASE_URL}/v5/order/create`,
+  orderPayload,
+  API_KEY,
+  API_SECRET
+);
+
+console.log("📤 Order Response:", JSON.stringify(orderRes, null, 2));
+
+return res.json({
+  ok: true,
+  message: `Opened ${side} ${cleanSymbol} @ ${price}`,
+  qty,
+  leverage,
+  tp,
+  sl,              // 🔁 Response zeigt nun den tatsächlichen 21%-SL
+  bybitResponse: orderRes,
+});
+
 
 
     console.log("🟩 Order Payload (forced One-Way):", orderPayload);
